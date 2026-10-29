@@ -215,7 +215,9 @@ module l1d_victim_cache #(`L1D_PARAMS) (
     end
     assign lookup_hit  = |lk_match;
     assign lookup_slot = lk_idx;
-    wire [N-1:0] lk_pick = {lk_first[N-1:1], ~|lk_first[N-1:1]};   // N = 8 bits
+    // TIMING OPT (VC-K): bit 0 of the pick is "slot 0 matches, or no other slot matches" (= ~|lk_first[N-1:1]: when slot 0 matches no
+    // higher slot is first; otherwise a higher slot is first exactly when one matches), so it no longer waits for the prefix chain.
+    wire [N-1:0] lk_pick = {lk_first[N-1:1], lk_match[0] | ~|lk_match[N-1:1]};   // N = 8 bits
     reg  [2:0]        lk_st;                              // 3 bits
     reg  [LINE_W-1:0] lk_data;                            // LINE_W = 512 bits
     reg               lk_dty, lk_shr;
@@ -287,13 +289,8 @@ module l1d_victim_cache #(`L1D_PARAMS) (
     wire         any_dirty = |is_dirty;
 
     reg                wb_act;                            // a line is being offered on the write channel
-    // TIMING OPT (VC-J): no wb_slot flop; the slot number is the OR-encode of wb_oh after the flop. wb_oh is one-hot whenever wb_act is 1
-    // (loaded at the start with the picked candidate), and enc(0) = 0 = the old wb_slot when wb_oh loaded an empty pick, so the number is
-    // the old one in every cycle. The hand-over test reads wb_oh[slot] (= wb_slot == slot while wb_act). The pick no longer passes the
-    // encoder before a flop.
-    wire [VC_ID_W-1:0] wb_slot;                           // the slot of that line, VC_ID_W = 3 bits
+    reg [VC_ID_W-1:0]  wb_slot;                           // the slot of that line
     reg [N-1:0]        wb_oh;                             // TIMING OPT (V-2): the same slot as one-hot bits, N = 8 bits
-    assign wb_slot = enc_oh(wb_oh);
     // start a new writeback: a WBPEND line not sent yet, or (under pressure /
     // while draining) the first VALID dirty line
     // start a new writeback when none is active and: a WBPEND line is waiting, or (no free slot left, or draining) a dirty VALID line exists
@@ -305,16 +302,16 @@ module l1d_victim_cache #(`L1D_PARAMS) (
     // sum of products, without the one-hot mux and the AND with wb_start: the lowest pending slot, or (no pending slot, under pressure)
     // the lowest dirty VALID slot. Equal to the old term in every cycle (any_pend = 1: wb_start = !wb_act and the pick is the pending one;
     // any_pend = 0: wb_start = !wb_act && pressure && any_dirty, and a dirty pick implies any_dirty).
+    // TIMING OPT (VC-H): the same wb_set, written as balanced logic: "a lower slot is pending / dirty" is one OR over the masked bits of
+    // each slot (a tree, not a ripple chain through the slots), and the global part of the dirty branch (idle, no pending slot, under
+    // pressure) is one signal wb_dg. Same value in every cycle.
     reg  [N-1:0]       wb_set;                            // N = 8 bits
-    reg                pend_below, dirty_below;           // a lower slot is pending / dirty
+    wire               wb_dg = !wb_act && !any_pend && pressure;
     integer            v;
     always @* begin
-        pend_below = 1'b0;  dirty_below = 1'b0;
-        for (v = 0; v < N; v = v + 1) begin
-            wb_set[v]   = !wb_act && ((is_pend[v] && !pend_below) || (!any_pend && pressure && is_dirty[v] && !dirty_below));
-            pend_below  = pend_below  | is_pend[v];
-            dirty_below = dirty_below | is_dirty[v];
-        end
+        for (v = 0; v < N; v = v + 1)
+            wb_set[v] = (!wb_act && is_pend[v] && ~|(is_pend & ((1 << v) - 1))) ||
+                        (wb_dg && is_dirty[v] && ~|(is_dirty & ((1 << v) - 1)));
     end
     // TIMING OPT (V-2): the write-back line and data by AND-OR with wb_oh (a register next to wb_slot that always holds the same slot)
     reg  [LINE_ADDR_W-1:0] wb_la;                         // LINE_ADDR_W = 58 bits
@@ -374,7 +371,7 @@ module l1d_victim_cache #(`L1D_PARAMS) (
             m_ln        = h_ins ? eq_ins : (la[sn] == lookup_line_addr_next);
             match_n[sn] = m_ln;
             // VC-E: iss after this edge, the late wb_set in the last AND
-            h_hand    = wb_act && writeback_req_ready && wb_oh[sn];          // VC-J
+            h_hand    = wb_act && writeback_req_ready && (wb_slot == sn);
             iss_n[sn] = (h_ins ? 1'b0 : (h_hand || iss[sn])) && !wb_set[sn];
         end
     end
@@ -391,6 +388,7 @@ module l1d_victim_cache #(`L1D_PARAMS) (
                 iss[s] <= 1'b0;
             end
             wb_act  <= 1'b0;
+            wb_slot <= {VC_ID_W{1'b0}};
             wb_oh   <= {{(N-1){1'b0}}, 1'b1};
             slot_freed_pulses   <= {N{1'b0}};
         end else begin
@@ -414,6 +412,7 @@ module l1d_victim_cache #(`L1D_PARAMS) (
             // while wb_act: hand-over, and the write-back pins, which l1d_bank.v uses only with writeback_req_valid). At a start it takes the
             // same slot as before; the write-back address / slot / data pins differ from the old code only while writeback_req_valid is 0.
             if (!wb_act) begin
+                wb_slot <= wb_pick;
                 wb_oh   <= wb_pick_oh;
             end
             // snoop read on a VALID slot: shared and clean (an invalidating snoop frees the slot: st_n)

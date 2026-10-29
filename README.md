@@ -63,9 +63,22 @@ without the write-back start (exact only under extra protocol rules, which the r
 | `original` (rtl/ref) | 346.2 | 335.3 | 343.7 | reference |
 | `v1245` (V-1, V-2, V-4, V-5) | 301.8 | 293.3 | 299.3 | lockstep 3/3, formal 4 cycles |
 | `v7` (+ V-7) | 294.6 | 284.6 | 292.1 | lockstep 3/3, formal 4 cycles |
-| **`opt`** (+ VC-A, VC-D, VC-E) | **282.4** | **263.0** | **279.9** | lockstep 3/3, formal 4 cycles |
+| `opt` before round 2 (+ VC-A, VC-D, VC-E) | 282.4 | 263.0 | 279.9 | lockstep 3/3, formal 4 cycles |
+| **`opt`** (+ VC-F, VC-G, VC-I) | **258.7** | **253.0** | **256.2** | lockstep 3/3, formal 4 cycles |
 
-Remaining failing groups of `opt` at 250 ps: `lk_match_q` -32.4, `st` -26.3, `wb_slot` -13.8, `iss` -7.4 ps (after gate sizing -13.0 ps).
+Rounds since then (each candidate against the `opt` of its round; a candidate wins only if it is faster at 250 ps both after synthesis
+and after sizing):
+
+| Round | Candidate | 250 synth | 250 sized | 200 synth | Result |
+|---|---|---|---|---|---|
+| 1 | VC-F: only the address part of the look-ahead in a flop, "in use" from the state after the flop | 295.6 | 275.4 | 293.1 | dropped |
+| 1 | VC-G: VC-F with own in-use flops | 273.3 | 264.5 | 270.8 | not a winner (sized 1.5 ps slower); base of round 2 |
+| 1 | VC-H: VC-F with a balanced write-back pick | 289.1 | 281.3 | 286.6 | dropped |
+| 2 | VC-I: VC-G with the slot state in 2 bits (values 0 .. 3 only) | **258.7** | **253.0** | **256.2** | **winner, now `opt`** |
+| 2 | VC-J: VC-G without the wb_slot flop (number encoded after wb_oh) | 274.6 | 267.9 | 272.1 | dropped |
+| 2 | VC-I + VC-J | 274.4 | 268.9 | 271.9 | dropped |
+
+Remaining failing groups of `opt` at 250 ps: `st` -8.7, `lookup_line_data` -6.5, `use_q` -6.1 ps (after gate sizing -3.0 ps).
 The remaining limit of every version is the one-cycle loop "all slot states -> any pending / dirty / free -> lowest slot -> next state". A
 cure without extra cycles is what the variants explore; registering the write-back decision would add a cycle to the start of a write-back.
 

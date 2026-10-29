@@ -153,7 +153,10 @@ module l1d_victim_cache #(`L1D_PARAMS) (
     output reg  [N-1:0]           slot_freed_pulses;      // one bit per slot: it became free
 
     // ---- the memory of the victim cache: one record per slot ----
-    reg [2:0]             st   [0:N-1];                   // slot state (VC_FREE / VC_VALID / VC_MOVING / VC_WBPEND)
+    // TIMING OPT (VC-I): the state is stored in 2 bits. Every value ever written is one of VC_FREE / VC_VALID / VC_MOVING / VC_WBPEND
+    // (0 .. 3), so the top bit of the old 3-bit register is 0 in every cycle; reads zero-extend it (lookup_slot_state shows the same
+    // 3-bit value) and every state decode loses one input.
+    reg [1:0]             st   [0:N-1];                   // slot state (VC_FREE / VC_VALID / VC_MOVING / VC_WBPEND), 2 bits
     reg [LINE_ADDR_W-1:0] la   [0:N-1];                   // line address stored in the slot
     reg                   dty  [0:N-1];                   // the line is dirty (memory is stale)
     reg                   shr  [0:N-1];   // line was shared (S): a swap back installs S
@@ -184,7 +187,15 @@ module l1d_victim_cache #(`L1D_PARAMS) (
     // and hold lookup_line_addr_next after this clock edge. In the next cycle that is exactly the old CAM result (in_use & la == lookup_line_addr),
     // because the bank looks up next cycle the line it gives as lookup_line_addr_next now (s2_line <= s1_line, no stall). Right after reset
     // every slot is free, so the match is 0 either way. The 58-bit compares now end in a flop instead of starting the lookup outputs.
-    reg  [N-1:0] lk_match_q;                              // N = 8 bits
+    // TIMING OPT (VC-F): only the ADDRESS part of the look-ahead is registered (lk_addr_q: the slot will hold lookup_line_addr_next after
+    // this edge); the "in use" part is taken AFTER the flop from the slot state itself, because "st_n != FREE now" is exactly "st != FREE"
+    // in the next cycle. So lk_match_q is the same value as before in every cycle (no assumption), and the late write-back pick (wb_set)
+    // no longer reaches the look-ahead flops; the lookup outputs get one more gate (the in-use decode).
+    // TIMING OPT (VC-G): the in-use bits come from their own flops use_q (loaded with st_n != FREE, so use_q == (st != FREE) in every cycle),
+    // so the lookup path starts with one AND of two flops instead of the 3-bit state decode.
+    reg  [N-1:0] lk_addr_q;                               // N = 8 bits
+    reg  [N-1:0] use_q;                                   // N = 8 bits
+    wire [N-1:0] lk_match_q = lk_addr_q & use_q;          // N = 8 bits (the name is kept: the test counts multi-slot matches with it)
     wire [N-1:0] lk_match = lk_match_q;                   // N = 8 bits
     // TIMING OPT (V-1): the lowest matching slot as ONE-HOT bits (prefix chain) and the slot's state, data, dirty and shared bits
     // by AND-OR with it, not the encoded number as a mux select (512-bit data). lk_pick = lk_first, or slot 0 when no other slot is picked,
@@ -354,9 +365,9 @@ module l1d_victim_cache #(`L1D_PARAMS) (
             // the late write-back start, in the last AND-OR
             wbe      = wb_set[sn] && !ovr;
             st_n[sn] = ({3{wbe}} & VC_WBPEND) | ({3{!wbe}} & st_o);
-            // VC-D: the look-ahead match with the late wb_set last (was: (st_n[sn] != VC_FREE) && m_ln)
+            // VC-F: the look-ahead address match only (the slot's line after this edge equals lookup_line_addr_next)
             m_ln        = h_ins ? eq_ins : (la[sn] == lookup_line_addr_next);
-            match_n[sn] = (m_ln && (st_o != VC_FREE)) || (m_ln && !ovr && wb_set[sn]);
+            match_n[sn] = m_ln;
             // VC-E: iss after this edge, the late wb_set in the last AND
             h_hand    = wb_act && writeback_req_ready && (wb_slot == sn);
             iss_n[sn] = (h_ins ? 1'b0 : (h_hand || iss[sn])) && !wb_set[sn];
@@ -366,7 +377,8 @@ module l1d_victim_cache #(`L1D_PARAMS) (
     integer s;
     always @(posedge clk) begin
         if (rst) begin
-            lk_match_q <= {N{1'b0}};
+            lk_addr_q <= {N{1'b0}};
+            use_q     <= {N{1'b0}};
             for (s = 0; s < N; s = s + 1) begin
                 st[s]  <= VC_FREE;
                 dty[s] <= 1'b0;
@@ -379,10 +391,11 @@ module l1d_victim_cache #(`L1D_PARAMS) (
             slot_freed_pulses   <= {N{1'b0}};
         end else begin
             slot_freed_pulses <= {N{1'b0}};
-            lk_match_q <= match_n;
+            lk_addr_q <= match_n;                          // VC-F: address part only
             // TIMING OPT (V-7): the slot states from st_n (B response, drain, write-back start, swap, snoop invalidate, release, insert)
             for (s = 0; s < N; s = s + 1) begin
                 st[s]  <= st_n[s];
+                use_q[s] <= (st_n[s] != VC_FREE);          // VC-G: equal to (st != FREE) after the edge
                 iss[s] <= iss_n[s];                        // VC-E: hand-over sets it, a start or an insert clears it
             end
             // write response: the line is in memory, the slot is free (state: st_n)

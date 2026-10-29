@@ -194,8 +194,8 @@ module l1d_victim_cache #(`L1D_PARAMS) (
     // TIMING OPT (VC-G): the in-use bits come from their own flops use_q (loaded with st_n != FREE, so use_q == (st != FREE) in every cycle),
     // so the lookup path starts with one AND of two flops instead of the 3-bit state decode.
     reg  [N-1:0] lk_addr_q;                               // N = 8 bits
-    reg  [N-1:0] use_q;                                   // N = 8 bits
-    wire [N-1:0] lk_match_q = lk_addr_q & use_q;          // N = 8 bits (the name is kept: the test counts multi-slot matches with it)
+    // TIMING OPT (VC-M): with the 2-bit state (VC-I) "in use" is one OR2 of the state flops, so the use_q copies are dropped again.
+    wire [N-1:0] lk_match_q = lk_addr_q & in_use;         // N = 8 bits (the name is kept: the test counts multi-slot matches with it)
     wire [N-1:0] lk_match = lk_match_q;                   // N = 8 bits
     // TIMING OPT (V-1): the lowest matching slot as ONE-HOT bits (prefix chain) and the slot's state, data, dirty and shared bits
     // by AND-OR with it, not the encoded number as a mux select (512-bit data). lk_pick = lk_first, or slot 0 when no other slot is picked,
@@ -215,7 +215,9 @@ module l1d_victim_cache #(`L1D_PARAMS) (
     end
     assign lookup_hit  = |lk_match;
     assign lookup_slot = lk_idx;
-    wire [N-1:0] lk_pick = {lk_first[N-1:1], ~|lk_first[N-1:1]};   // N = 8 bits
+    // TIMING OPT (VC-K): bit 0 of the pick is "slot 0 matches, or no other slot matches" (= ~|lk_first[N-1:1]: when slot 0 matches no
+    // higher slot is first; otherwise a higher slot is first exactly when one matches), so it no longer waits for the prefix chain.
+    wire [N-1:0] lk_pick = {lk_first[N-1:1], lk_match[0] | ~|lk_match[N-1:1]};   // N = 8 bits
     reg  [2:0]        lk_st;                              // 3 bits
     reg  [LINE_W-1:0] lk_data;                            // LINE_W = 512 bits
     reg               lk_dty, lk_shr;
@@ -378,7 +380,6 @@ module l1d_victim_cache #(`L1D_PARAMS) (
     always @(posedge clk) begin
         if (rst) begin
             lk_addr_q <= {N{1'b0}};
-            use_q     <= {N{1'b0}};
             for (s = 0; s < N; s = s + 1) begin
                 st[s]  <= VC_FREE;
                 dty[s] <= 1'b0;
@@ -395,7 +396,6 @@ module l1d_victim_cache #(`L1D_PARAMS) (
             // TIMING OPT (V-7): the slot states from st_n (B response, drain, write-back start, swap, snoop invalidate, release, insert)
             for (s = 0; s < N; s = s + 1) begin
                 st[s]  <= st_n[s];
-                use_q[s] <= (st_n[s] != VC_FREE);          // VC-G: equal to (st != FREE) after the edge
                 iss[s] <= iss_n[s];                        // VC-E: hand-over sets it, a start or an insert clears it
             end
             // write response: the line is in memory, the slot is free (state: st_n)

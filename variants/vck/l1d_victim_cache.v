@@ -153,7 +153,10 @@ module l1d_victim_cache #(`L1D_PARAMS) (
     output reg  [N-1:0]           slot_freed_pulses;      // one bit per slot: it became free
 
     // ---- the memory of the victim cache: one record per slot ----
-    reg [2:0]             st   [0:N-1];                   // slot state (VC_FREE / VC_VALID / VC_MOVING / VC_WBPEND)
+    // TIMING OPT (VC-I): the state is stored in 2 bits. Every value ever written is one of VC_FREE / VC_VALID / VC_MOVING / VC_WBPEND
+    // (0 .. 3), so the top bit of the old 3-bit register is 0 in every cycle; reads zero-extend it (lookup_slot_state shows the same
+    // 3-bit value) and every state decode loses one input.
+    reg [1:0]             st   [0:N-1];                   // slot state (VC_FREE / VC_VALID / VC_MOVING / VC_WBPEND), 2 bits
     reg [LINE_ADDR_W-1:0] la   [0:N-1];                   // line address stored in the slot
     reg                   dty  [0:N-1];                   // the line is dirty (memory is stale)
     reg                   shr  [0:N-1];   // line was shared (S): a swap back installs S
@@ -212,7 +215,9 @@ module l1d_victim_cache #(`L1D_PARAMS) (
     end
     assign lookup_hit  = |lk_match;
     assign lookup_slot = lk_idx;
-    wire [N-1:0] lk_pick = {lk_first[N-1:1], ~|lk_first[N-1:1]};   // N = 8 bits
+    // TIMING OPT (VC-K): bit 0 of the pick is "slot 0 matches, or no other slot matches" (= ~|lk_first[N-1:1]: when slot 0 matches no
+    // higher slot is first; otherwise a higher slot is first exactly when one matches), so it no longer waits for the prefix chain.
+    wire [N-1:0] lk_pick = {lk_first[N-1:1], lk_match[0] | ~|lk_match[N-1:1]};   // N = 8 bits
     reg  [2:0]        lk_st;                              // 3 bits
     reg  [LINE_W-1:0] lk_data;                            // LINE_W = 512 bits
     reg               lk_dty, lk_shr;
@@ -284,13 +289,8 @@ module l1d_victim_cache #(`L1D_PARAMS) (
     wire         any_dirty = |is_dirty;
 
     reg                wb_act;                            // a line is being offered on the write channel
-    // TIMING OPT (VC-J): no wb_slot flop; the slot number is the OR-encode of wb_oh after the flop. wb_oh is one-hot whenever wb_act is 1
-    // (loaded at the start with the picked candidate), and enc(0) = 0 = the old wb_slot when wb_oh loaded an empty pick, so the number is
-    // the old one in every cycle. The hand-over test reads wb_oh[slot] (= wb_slot == slot while wb_act). The pick no longer passes the
-    // encoder before a flop.
-    wire [VC_ID_W-1:0] wb_slot;                           // the slot of that line, VC_ID_W = 3 bits
+    reg [VC_ID_W-1:0]  wb_slot;                           // the slot of that line
     reg [N-1:0]        wb_oh;                             // TIMING OPT (V-2): the same slot as one-hot bits, N = 8 bits
-    assign wb_slot = enc_oh(wb_oh);
     // start a new writeback: a WBPEND line not sent yet, or (under pressure /
     // while draining) the first VALID dirty line
     // start a new writeback when none is active and: a WBPEND line is waiting, or (no free slot left, or draining) a dirty VALID line exists
@@ -371,7 +371,7 @@ module l1d_victim_cache #(`L1D_PARAMS) (
             m_ln        = h_ins ? eq_ins : (la[sn] == lookup_line_addr_next);
             match_n[sn] = m_ln;
             // VC-E: iss after this edge, the late wb_set in the last AND
-            h_hand    = wb_act && writeback_req_ready && wb_oh[sn];          // VC-J
+            h_hand    = wb_act && writeback_req_ready && (wb_slot == sn);
             iss_n[sn] = (h_ins ? 1'b0 : (h_hand || iss[sn])) && !wb_set[sn];
         end
     end
@@ -388,6 +388,7 @@ module l1d_victim_cache #(`L1D_PARAMS) (
                 iss[s] <= 1'b0;
             end
             wb_act  <= 1'b0;
+            wb_slot <= {VC_ID_W{1'b0}};
             wb_oh   <= {{(N-1){1'b0}}, 1'b1};
             slot_freed_pulses   <= {N{1'b0}};
         end else begin
@@ -411,6 +412,7 @@ module l1d_victim_cache #(`L1D_PARAMS) (
             // while wb_act: hand-over, and the write-back pins, which l1d_bank.v uses only with writeback_req_valid). At a start it takes the
             // same slot as before; the write-back address / slot / data pins differ from the old code only while writeback_req_valid is 0.
             if (!wb_act) begin
+                wb_slot <= wb_pick;
                 wb_oh   <= wb_pick_oh;
             end
             // snoop read on a VALID slot: shared and clean (an invalidating snoop frees the slot: st_n)
