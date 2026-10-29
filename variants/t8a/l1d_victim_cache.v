@@ -391,11 +391,11 @@ module l1d_victim_cache #(`L1D_PARAMS) (
     localparam LK_DUP = 4;                                // number of copies
     localparam LK_PW  = LINE_W / LK_DUP;                  // LK_PW = 128 bits per part
     (* keep *) reg [N-1:0] lka_c [0:LK_DUP-1];            // N = 8 bits per copy
-    (* keep *) reg [N-1:0] use_c [0:LK_DUP-1];            // N = 8 bits per copy
     genvar gp;
     generate
         for (gp = 0; gp < LK_DUP; gp = gp + 1) begin : g_lkd
-            wire [N-1:0] m_c = lka_c[gp] & use_c[gp];     // N = 8 bits
+            // TIMING OPT (VC-W): every copy uses the one use_q (no use_c copies): the late write-back pick drives 8 in-use flops, not 40
+            wire [N-1:0] m_c = lka_c[gp] & use_q;         // N = 8 bits
             // VC-S: a priority-mux tree per copy (LK_PW = 128 data bits)
             wire [LK_PW-1:0] tv [0:2*N-2];                // node values, LK_PW = 128 bits
             wire             ta [0:2*N-2];                // node has a match
@@ -417,10 +417,8 @@ module l1d_victim_cache #(`L1D_PARAMS) (
             always @(posedge clk) begin
                 if (rst) begin
                     lka_c[gp] <= {N{1'b0}};
-                    use_c[gp] <= {N{1'b0}};
                 end else begin
                     lka_c[gp] <= match_n;
-                    use_c[gp] <= use_n;
                 end
             end
         end

@@ -66,7 +66,8 @@ without the write-back start (exact only under extra protocol rules, which the r
 | `opt` before round 2 (+ VC-A, VC-D, VC-E) | 282.4 | 263.0 | 279.9 | lockstep 3/3, formal 4 cycles |
 | `opt` after round 2 (+ VC-F, VC-G, VC-I) | 258.7 | 253.0 | 256.2 | lockstep 3/3, formal 4 cycles |
 | `opt` after round 3 (+ VC-K, VC-H) | 254.6 | 249.6 (meets 250) | 252.1 | lockstep 3/3, formal 4 cycles |
-| **`opt`** (+ VC-N, VC-P) | **253.0** | **248.5 (meets 250)** | **250.5** | lockstep 3/3, formal 4 cycles |
+| `opt` after round 4 (+ VC-N, VC-P) | 253.0 | 248.5 (meets 250) | 250.5 | lockstep 3/3, formal 4 cycles |
+| **`opt`** (+ VC-S, VC-T) | **251.3** | **246.8 (meets 250)** | **248.8** | lockstep 3/3, formal 4 cycles |
 
 Rounds since then (each candidate against the `opt` of its round; a candidate wins only if it is faster at 250 ps both after synthesis
 and after sizing):
@@ -88,8 +89,13 @@ and after sizing):
 | 5 | VC-N with 8 copies (64 data bits per pick) | 258.0 | 253.8 | 255.5 | dropped |
 | 5 | VC-N with 16 copies | 275.0 | 253.0 | 272.5 | dropped |
 | 5 | VC-N with 32 copies | 308.4 | 259.8 | 305.9 | dropped (more copies: more flop and area, no fewer buffer levels after synthesis) |
+| 6 | VC-S: lookup select as a binary priority-mux tree, per data copy | 250.9 | 248.6 | 248.4 | not a winner (sized +0.1); `lookup_line_data` at 200 ps -50.5 -> -30.2 |
+| 6 | VC-S: one tree for data and flags, no copies | 266.0 | 255.0 | 263.5 | dropped |
+| 6 | VC-S per copy + a tree for the flags | 271.0 | 254.5 | 268.5 | dropped |
+| 7 | VC-T: victim_slot_available from the clean slots directly (exact: the age order is total on all inserted slots) | 273.3 | 252.9 | 270.8 | dropped alone |
+| 7 | VC-S per copy + VC-T | **251.3** | **246.8** | **248.8** | **winner by the rule (1.7 ps, noise level; also wins at 200 ps), now `opt`** |
 
-Remaining failing group of `opt` at 250 ps: `lookup_line_data` -3.0 ps (22 endpoints; each pick bit still drives its 128 data bits through three buffer levels). After gate sizing every path meets 250 ps (slack +1.5 ps). At 200 ps: `lookup_line_data` -50.5, `lookup_dirty` -46.6, `wb_slot` -43.3, `use_c` -42.4, `st` -39.9.
+Remaining failing groups of `opt` at 250 ps: `st` -1.3, `use_c` -0.1 ps (the write-back pick loop). After gate sizing every path meets 250 ps (slack +3.2 ps). At 200 ps: `st` -48.8, `use_c` -47.6, `iss` -32.0, `lookup_line_data` -30.2.
 The remaining limit of every version is the one-cycle loop "all slot states -> any pending / dirty / free -> lowest slot -> next state". A
 cure without extra cycles is what the variants explore; registering the write-back decision would add a cycle to the start of a write-back.
 

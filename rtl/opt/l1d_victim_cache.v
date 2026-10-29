@@ -275,7 +275,11 @@ module l1d_victim_cache #(`L1D_PARAMS) (
         .oldest_index    (clean_slot),
         .any_candidate   (any_clean)
     );
-    assign victim_slot_available   = any_free || any_clean;
+    // TIMING OPT (VC-T): "a clean candidate exists" is |is_clean, not the age matrix's any_candidate (= |oldest_onehot, after the whole
+    // older-than compare). Equal in every cycle: a slot becomes VALID only by an insert, which allocates it in the age matrix in the same
+    // cycle and makes it younger than every other slot, so "older" is a total order on all slots inserted since reset; among the clean
+    // VALID slots an oldest one therefore always exists when there is any.
+    assign victim_slot_available   = any_free || (|is_clean);
     assign victim_slot_index = any_free ? free_slot : clean_slot;
 
     // ---------------- writeback selection ----------------
@@ -376,6 +380,11 @@ module l1d_victim_cache #(`L1D_PARAMS) (
     reg [N-1:0] use_n;                                    // in use after this edge, N = 8 bits
     integer un;
     always @* for (un = 0; un < N; un = un + 1) use_n[un] = (st_n[un] != VC_FREE);
+    // TIMING OPT (VC-S): the lookup select is a binary PRIORITY-MUX TREE instead of "first match -> AND-OR": each node takes its lower half when
+    // that half has a match or neither half has one, else its upper half. By induction a node gives the lowest matching slot of its subtree,
+    // or its lowest slot when nothing in it matches; so the root gives the lowest matching slot, or slot 0 when nothing matches, which is
+    // exactly the old pick in every cycle. Each node select is one gate from the match flops, so the wide buffer trees start early and run
+    // in parallel with the mux levels.
     // TIMING OPT (VC-N): the 512-bit data select is the widest fan-out of the module (each pick bit drives every data bit through a buffer
     // tree). It is split into LK_DUP parts; each part has its own (* keep *) copies of the look-ahead and in-use flops (loaded with the same
     // values as lk_addr_q / use_q, so equal in every cycle) and its own pick, and drives only LINE_W / LK_DUP data bits.
@@ -387,20 +396,24 @@ module l1d_victim_cache #(`L1D_PARAMS) (
     generate
         for (gp = 0; gp < LK_DUP; gp = gp + 1) begin : g_lkd
             wire [N-1:0] m_c = lka_c[gp] & use_c[gp];     // N = 8 bits
-            reg  [N-1:0] f_c;                             // first match, one-hot, N = 8 bits
-            reg          s_c;
-            reg  [LK_PW-1:0] d_c;                         // LK_PW = 128 bits
-            integer qq;
-            always @* begin
-                s_c = 1'b0;
-                for (qq = 0; qq < N; qq = qq + 1)
-                    f_c[qq] = m_c[qq] & ~|(m_c & ((1 << qq) - 1));   // VC-P
-                f_c[0] = m_c[0] | ~|m_c[N-1:1];           // VC-K: slot 0 also when nothing matches
-                d_c = {LK_PW{1'b0}};
-                for (qq = 0; qq < N; qq = qq + 1)
-                    d_c = d_c | ({LK_PW{f_c[qq]}} & dmem[qq][gp*LK_PW +: LK_PW]);
+            // VC-S: a priority-mux tree per copy (LK_PW = 128 data bits)
+            wire [LK_PW-1:0] tv [0:2*N-2];                // node values, LK_PW = 128 bits
+            wire             ta [0:2*N-2];                // node has a match
+            genvar tq, tl, ti;
+            for (tq = 0; tq < N; tq = tq + 1) begin : g_leaf
+                assign tv[tq] = dmem[tq][gp*LK_PW +: LK_PW];
+                assign ta[tq] = m_c[tq];
             end
-            assign lookup_line_data[gp*LK_PW +: LK_PW] = d_c;
+            for (tl = 1; tl <= VC_ID_W; tl = tl + 1) begin : g_lvl
+                for (ti = 0; ti < (N >> tl); ti = ti + 1) begin : g_node
+                    localparam LO = 2*N - ((2*N) >> (tl - 1)) + 2*ti;    // lower child (node index)
+                    localparam ND = 2*N - ((2*N) >> tl) + ti;            // this node
+                    wire sel_lo = ta[LO] | ~ta[LO+1];
+                    assign tv[ND] = sel_lo ? tv[LO] : tv[LO+1];
+                    assign ta[ND] = ta[LO] | ta[LO+1];
+                end
+            end
+            assign lookup_line_data[gp*LK_PW +: LK_PW] = tv[2*N-2];
             always @(posedge clk) begin
                 if (rst) begin
                     lka_c[gp] <= {N{1'b0}};

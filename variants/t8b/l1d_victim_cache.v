@@ -347,6 +347,7 @@ module l1d_victim_cache #(`L1D_PARAMS) (
     reg  [2:0]             st_n [0:N-1];                  // 3 bits per slot
     reg  [N-1:0]           match_n;                       // N = 8 bits
     reg  [N-1:0]           iss_n;                         // N = 8 bits
+    reg  [N-1:0]           use_o, ovr_v, b_hit;           // VC-U: per slot, N = 8 bits each
     reg  [2:0]             st_base, st_ovr, st_o;         // 3 bits each
     reg                    ovr, wbe, h_swp, h_snp, h_rel, h_ins, m_ln, h_hand;
     wire                   eq_ins = (insert_line_addr == lookup_line_addr_next);
@@ -365,6 +366,9 @@ module l1d_victim_cache #(`L1D_PARAMS) (
             ovr    = h_swp || h_snp || h_rel || h_ins;
             st_ovr = h_ins ? (insert_as_writeback_pending ? VC_WBPEND : VC_VALID) : ((h_rel || h_snp) ? VC_FREE : VC_MOVING);
             st_o   = ovr ? st_ovr : st_base;
+            use_o[sn] = (st_o != VC_FREE);                 // VC-U
+            ovr_v[sn] = ovr;
+            b_hit[sn] = writeback_done_valid && (writeback_done_slot_id == sn);
             // the late write-back start, in the last AND-OR
             wbe      = wb_set[sn] && !ovr;
             st_n[sn] = ({3{wbe}} & VC_WBPEND) | ({3{!wbe}} & st_o);
@@ -379,39 +383,49 @@ module l1d_victim_cache #(`L1D_PARAMS) (
 
     reg [N-1:0] use_n;                                    // in use after this edge, N = 8 bits
     integer un;
-    always @* for (un = 0; un < N; un = un + 1) use_n[un] = (st_n[un] != VC_FREE);
+    // TIMING OPT (VC-U): use_n = (st_n != FREE) written as (st_o != FREE) | (wb_set & !ovr & B response on this slot). Equal in every cycle: the
+    // write-back start makes a slot WBPEND (never FREE), and it meets st_o == FREE only when a B response frees that same slot in this cycle
+    // (a start needs a WBPEND or dirty VALID slot; the drain frees only clean VALID slots). The late pick meets only the last AND-OR.
+    always @* for (un = 0; un < N; un = un + 1) use_n[un] = use_o[un] | (wb_set[un] & ~ovr_v[un] & b_hit[un]);
+    // TIMING OPT (VC-S): the lookup select is a binary PRIORITY-MUX TREE instead of "first match -> AND-OR": each node takes its lower half when
+    // that half has a match or neither half has one, else its upper half. By induction a node gives the lowest matching slot of its subtree,
+    // or its lowest slot when nothing in it matches; so the root gives the lowest matching slot, or slot 0 when nothing matches, which is
+    // exactly the old pick in every cycle. Each node select is one gate from the match flops, so the wide buffer trees start early and run
+    // in parallel with the mux levels.
     // TIMING OPT (VC-N): the 512-bit data select is the widest fan-out of the module (each pick bit drives every data bit through a buffer
     // tree). It is split into LK_DUP parts; each part has its own (* keep *) copies of the look-ahead and in-use flops (loaded with the same
     // values as lk_addr_q / use_q, so equal in every cycle) and its own pick, and drives only LINE_W / LK_DUP data bits.
     localparam LK_DUP = 4;                                // number of copies
     localparam LK_PW  = LINE_W / LK_DUP;                  // LK_PW = 128 bits per part
     (* keep *) reg [N-1:0] lka_c [0:LK_DUP-1];            // N = 8 bits per copy
-    (* keep *) reg [N-1:0] use_c [0:LK_DUP-1];            // N = 8 bits per copy
     genvar gp;
     generate
         for (gp = 0; gp < LK_DUP; gp = gp + 1) begin : g_lkd
-            wire [N-1:0] m_c = lka_c[gp] & use_c[gp];     // N = 8 bits
-            reg  [N-1:0] f_c;                             // first match, one-hot, N = 8 bits
-            reg          s_c;
-            reg  [LK_PW-1:0] d_c;                         // LK_PW = 128 bits
-            integer qq;
-            always @* begin
-                s_c = 1'b0;
-                for (qq = 0; qq < N; qq = qq + 1)
-                    f_c[qq] = m_c[qq] & ~|(m_c & ((1 << qq) - 1));   // VC-P
-                f_c[0] = m_c[0] | ~|m_c[N-1:1];           // VC-K: slot 0 also when nothing matches
-                d_c = {LK_PW{1'b0}};
-                for (qq = 0; qq < N; qq = qq + 1)
-                    d_c = d_c | ({LK_PW{f_c[qq]}} & dmem[qq][gp*LK_PW +: LK_PW]);
+            // TIMING OPT (VC-W): every copy uses the one use_q (no use_c copies): the late write-back pick drives 8 in-use flops, not 40
+            wire [N-1:0] m_c = lka_c[gp] & use_q;         // N = 8 bits
+            // VC-S: a priority-mux tree per copy (LK_PW = 128 data bits)
+            wire [LK_PW-1:0] tv [0:2*N-2];                // node values, LK_PW = 128 bits
+            wire             ta [0:2*N-2];                // node has a match
+            genvar tq, tl, ti;
+            for (tq = 0; tq < N; tq = tq + 1) begin : g_leaf
+                assign tv[tq] = dmem[tq][gp*LK_PW +: LK_PW];
+                assign ta[tq] = m_c[tq];
             end
-            assign lookup_line_data[gp*LK_PW +: LK_PW] = d_c;
+            for (tl = 1; tl <= VC_ID_W; tl = tl + 1) begin : g_lvl
+                for (ti = 0; ti < (N >> tl); ti = ti + 1) begin : g_node
+                    localparam LO = 2*N - ((2*N) >> (tl - 1)) + 2*ti;    // lower child (node index)
+                    localparam ND = 2*N - ((2*N) >> tl) + ti;            // this node
+                    wire sel_lo = ta[LO] | ~ta[LO+1];
+                    assign tv[ND] = sel_lo ? tv[LO] : tv[LO+1];
+                    assign ta[ND] = ta[LO] | ta[LO+1];
+                end
+            end
+            assign lookup_line_data[gp*LK_PW +: LK_PW] = tv[2*N-2];
             always @(posedge clk) begin
                 if (rst) begin
                     lka_c[gp] <= {N{1'b0}};
-                    use_c[gp] <= {N{1'b0}};
                 end else begin
                     lka_c[gp] <= match_n;
-                    use_c[gp] <= use_n;
                 end
             end
         end
