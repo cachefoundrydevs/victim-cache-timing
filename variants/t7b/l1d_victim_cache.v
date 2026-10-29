@@ -218,36 +218,19 @@ module l1d_victim_cache #(`L1D_PARAMS) (
     // TIMING OPT (VC-K): bit 0 of the pick is "slot 0 matches, or no other slot matches" (= ~|lk_first[N-1:1]: when slot 0 matches no
     // higher slot is first; otherwise a higher slot is first exactly when one matches), so it no longer waits for the prefix chain.
     wire [N-1:0] lk_pick = {lk_first[N-1:1], lk_match[0] | ~|lk_match[N-1:1]};   // N = 8 bits
-    // TIMING OPT (VC-S): the lookup select is a binary PRIORITY-MUX TREE instead of "first match -> AND-OR": each node takes its lower half when
-    // that half has a match or neither half has one, else its upper half. By induction a node gives the lowest matching slot of its subtree,
-    // or its lowest slot when nothing in it matches; so the root gives the lowest matching slot, or slot 0 when nothing matches, which is
-    // exactly the old pick in every cycle. Each node select is one gate from the match flops, so the wide buffer trees start early and run
-    // in parallel with the mux levels.
-    // One tree carries the data and the state, dirty and shared bits of the picked slot (LINE_W + 4 = 516 bits); no copies.
-    wire [LINE_W+4-1:0] lkt;                              // {shared, dirty, state, data}, LINE_W + 4 = 516 bits
-    wire [LINE_W+4-1:0] lt_v [0:2*N-2];                  // node values (LINE_W+4 bits)
-    wire          lt_a [0:2*N-2];                  // node has a match
-    genvar lt_q, lt_l, lt_i;
-    generate
-        for (lt_q = 0; lt_q < N; lt_q = lt_q + 1) begin : g_lt_leaf
-            assign lt_v[lt_q] = {shr[lt_q], dty[lt_q], st[lt_q], dmem[lt_q]};
-            assign lt_a[lt_q] = lk_match[lt_q];
+    reg  [2:0]        lk_st;                              // 3 bits
+    reg               lk_dty, lk_shr;
+    always @* begin
+        lk_st = 3'd0;  lk_dty = 1'b0;  lk_shr = 1'b0;
+        for (q = 0; q < N; q = q + 1) begin
+            lk_st   = lk_st   | ({3{lk_pick[q]}}      & st[q]);
+            lk_dty  = lk_dty  | (lk_pick[q] & dty[q]);
+            lk_shr  = lk_shr  | (lk_pick[q] & shr[q]);
         end
-        for (lt_l = 1; lt_l <= VC_ID_W; lt_l = lt_l + 1) begin : g_lt_lvl
-            for (lt_i = 0; lt_i < (N >> lt_l); lt_i = lt_i + 1) begin : g_lt_node
-                localparam LO = 2*N - ((2*N) >> (lt_l - 1)) + 2*lt_i;   // lower child (node index)
-                localparam ND = 2*N - ((2*N) >> lt_l) + lt_i;             // this node
-                wire sel_lo = lt_a[LO] | ~lt_a[LO+1];
-                assign lt_v[ND] = sel_lo ? lt_v[LO] : lt_v[LO+1];
-                assign lt_a[ND] = lt_a[LO] | lt_a[LO+1];
-            end
-        end
-    endgenerate
-    assign lkt = lt_v[2*N-2];
-    assign lookup_line_data  = lkt[LINE_W-1:0];
-    assign lookup_slot_state = {1'b0, lkt[LINE_W+1:LINE_W]};
-    assign lookup_dirty      = lkt[LINE_W+2];
-    assign lookup_shared     = lkt[LINE_W+3];
+    end
+    assign lookup_slot_state = lk_st;
+    assign lookup_dirty      = lk_dty;
+    assign lookup_shared     = lk_shr;
 
     // ---------------- slot for the next victim ----------------
     // ---- slot for the next victim: a free slot first; otherwise the oldest clean one (age matrix, insertion order) ----
@@ -292,7 +275,11 @@ module l1d_victim_cache #(`L1D_PARAMS) (
         .oldest_index    (clean_slot),
         .any_candidate   (any_clean)
     );
-    assign victim_slot_available   = any_free || any_clean;
+    // TIMING OPT (VC-T): "a clean candidate exists" is |is_clean, not the age matrix's any_candidate (= |oldest_onehot, after the whole
+    // older-than compare). Equal in every cycle: a slot becomes VALID only by an insert, which allocates it in the age matrix in the same
+    // cycle and makes it younger than every other slot, so "older" is a total order on all slots inserted since reset; among the clean
+    // VALID slots an oldest one therefore always exists when there is any.
+    assign victim_slot_available   = any_free || (|is_clean);
     assign victim_slot_index = any_free ? free_slot : clean_slot;
 
     // ---------------- writeback selection ----------------
@@ -393,6 +380,51 @@ module l1d_victim_cache #(`L1D_PARAMS) (
     reg [N-1:0] use_n;                                    // in use after this edge, N = 8 bits
     integer un;
     always @* for (un = 0; un < N; un = un + 1) use_n[un] = (st_n[un] != VC_FREE);
+    // TIMING OPT (VC-S): the lookup select is a binary PRIORITY-MUX TREE instead of "first match -> AND-OR": each node takes its lower half when
+    // that half has a match or neither half has one, else its upper half. By induction a node gives the lowest matching slot of its subtree,
+    // or its lowest slot when nothing in it matches; so the root gives the lowest matching slot, or slot 0 when nothing matches, which is
+    // exactly the old pick in every cycle. Each node select is one gate from the match flops, so the wide buffer trees start early and run
+    // in parallel with the mux levels.
+    // TIMING OPT (VC-N): the 512-bit data select is the widest fan-out of the module (each pick bit drives every data bit through a buffer
+    // tree). It is split into LK_DUP parts; each part has its own (* keep *) copies of the look-ahead and in-use flops (loaded with the same
+    // values as lk_addr_q / use_q, so equal in every cycle) and its own pick, and drives only LINE_W / LK_DUP data bits.
+    localparam LK_DUP = 4;                                // number of copies
+    localparam LK_PW  = LINE_W / LK_DUP;                  // LK_PW = 128 bits per part
+    (* keep *) reg [N-1:0] lka_c [0:LK_DUP-1];            // N = 8 bits per copy
+    (* keep *) reg [N-1:0] use_c [0:LK_DUP-1];            // N = 8 bits per copy
+    genvar gp;
+    generate
+        for (gp = 0; gp < LK_DUP; gp = gp + 1) begin : g_lkd
+            wire [N-1:0] m_c = lka_c[gp] & use_c[gp];     // N = 8 bits
+            // VC-S: a priority-mux tree per copy (LK_PW = 128 data bits)
+            wire [LK_PW-1:0] tv [0:2*N-2];                // node values, LK_PW = 128 bits
+            wire             ta [0:2*N-2];                // node has a match
+            genvar tq, tl, ti;
+            for (tq = 0; tq < N; tq = tq + 1) begin : g_leaf
+                assign tv[tq] = dmem[tq][gp*LK_PW +: LK_PW];
+                assign ta[tq] = m_c[tq];
+            end
+            for (tl = 1; tl <= VC_ID_W; tl = tl + 1) begin : g_lvl
+                for (ti = 0; ti < (N >> tl); ti = ti + 1) begin : g_node
+                    localparam LO = 2*N - ((2*N) >> (tl - 1)) + 2*ti;    // lower child (node index)
+                    localparam ND = 2*N - ((2*N) >> tl) + ti;            // this node
+                    wire sel_lo = ta[LO] | ~ta[LO+1];
+                    assign tv[ND] = sel_lo ? tv[LO] : tv[LO+1];
+                    assign ta[ND] = ta[LO] | ta[LO+1];
+                end
+            end
+            assign lookup_line_data[gp*LK_PW +: LK_PW] = tv[2*N-2];
+            always @(posedge clk) begin
+                if (rst) begin
+                    lka_c[gp] <= {N{1'b0}};
+                    use_c[gp] <= {N{1'b0}};
+                end else begin
+                    lka_c[gp] <= match_n;
+                    use_c[gp] <= use_n;
+                end
+            end
+        end
+    endgenerate
 
     integer s;
     always @(posedge clk) begin
