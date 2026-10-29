@@ -40,7 +40,7 @@ case "$FM" in *EQUIVALENT*) ;; *) status=1 ;; esac
 
 fi
 # ---- 3. timing ----
-SIZED=1 bash "$ROOT/flow/run_timing.sh" "$OPTD" 250 "$OUT/t250"
+SIZED=1 PATH_LOG=1 bash "$ROOT/flow/run_timing.sh" "$OPTD" 250 "$OUT/t250"
 bash "$ROOT/flow/run_timing.sh" "$OPTD" 200 "$OUT/t200"
 v() { sed -n "s/.* $2=\([^ ]*\).*/\1/p" "$1" 2>/dev/null | head -1; }
 

@@ -184,7 +184,12 @@ module l1d_victim_cache #(`L1D_PARAMS) (
     // and hold lookup_line_addr_next after this clock edge. In the next cycle that is exactly the old CAM result (in_use & la == lookup_line_addr),
     // because the bank looks up next cycle the line it gives as lookup_line_addr_next now (s2_line <= s1_line, no stall). Right after reset
     // every slot is free, so the match is 0 either way. The 58-bit compares now end in a flop instead of starting the lookup outputs.
-    reg  [N-1:0] lk_match_q;                              // N = 8 bits
+    // TIMING OPT (VC-F): only the ADDRESS part of the look-ahead is registered (lk_addr_q: the slot will hold lookup_line_addr_next after
+    // this edge); the "in use" part is taken AFTER the flop from the slot state itself, because "st_n != FREE now" is exactly "st != FREE"
+    // in the next cycle. So lk_match_q is the same value as before in every cycle (no assumption), and the late write-back pick (wb_set)
+    // no longer reaches the look-ahead flops; the lookup outputs get one more gate (the in-use decode).
+    reg  [N-1:0] lk_addr_q;                               // N = 8 bits
+    wire [N-1:0] lk_match_q = lk_addr_q & in_use;         // N = 8 bits (the name is kept: the test counts multi-slot matches with it)
     wire [N-1:0] lk_match = lk_match_q;                   // N = 8 bits
     // TIMING OPT (V-1): the lowest matching slot as ONE-HOT bits (prefix chain) and the slot's state, data, dirty and shared bits
     // by AND-OR with it, not the encoded number as a mux select (512-bit data). lk_pick = lk_first, or slot 0 when no other slot is picked,
@@ -289,16 +294,16 @@ module l1d_victim_cache #(`L1D_PARAMS) (
     // sum of products, without the one-hot mux and the AND with wb_start: the lowest pending slot, or (no pending slot, under pressure)
     // the lowest dirty VALID slot. Equal to the old term in every cycle (any_pend = 1: wb_start = !wb_act and the pick is the pending one;
     // any_pend = 0: wb_start = !wb_act && pressure && any_dirty, and a dirty pick implies any_dirty).
+    // TIMING OPT (VC-H): the same wb_set, written as balanced logic: "a lower slot is pending / dirty" is one OR over the masked bits of
+    // each slot (a tree, not a ripple chain through the slots), and the global part of the dirty branch (idle, no pending slot, under
+    // pressure) is one signal wb_dg. Same value in every cycle.
     reg  [N-1:0]       wb_set;                            // N = 8 bits
-    reg                pend_below, dirty_below;           // a lower slot is pending / dirty
+    wire               wb_dg = !wb_act && !any_pend && pressure;
     integer            v;
     always @* begin
-        pend_below = 1'b0;  dirty_below = 1'b0;
-        for (v = 0; v < N; v = v + 1) begin
-            wb_set[v]   = !wb_act && ((is_pend[v] && !pend_below) || (!any_pend && pressure && is_dirty[v] && !dirty_below));
-            pend_below  = pend_below  | is_pend[v];
-            dirty_below = dirty_below | is_dirty[v];
-        end
+        for (v = 0; v < N; v = v + 1)
+            wb_set[v] = (!wb_act && is_pend[v] && ~|(is_pend & ((1 << v) - 1))) ||
+                        (wb_dg && is_dirty[v] && ~|(is_dirty & ((1 << v) - 1)));
     end
     // TIMING OPT (V-2): the write-back line and data by AND-OR with wb_oh (a register next to wb_slot that always holds the same slot)
     reg  [LINE_ADDR_W-1:0] wb_la;                         // LINE_ADDR_W = 58 bits
@@ -325,10 +330,16 @@ module l1d_victim_cache #(`L1D_PARAMS) (
     // lowest slot) meets only the last AND-OR. The old order of the statements was: B response, drain, write-back start, swap, snoop
     // invalidate, release, insert, the later one winning. The last four come from the inputs only, so they are combined first (st_ovr / ovr);
     // the write-back start wins over the first two (st_base) and loses to the last four. Same next state in every case.
+    // TIMING OPT (VC-D): the look-ahead match uses (st_n != FREE) = wbe | (st_o != FREE) (the write-back start only makes a slot
+    // WBPEND, never FREE), written so that the late wb_set meets only the last AND-OR: match_n = (m & st_o != FREE) | (m & !ovr & wb_set).
+    // TIMING OPT (VC-E): iss ("the write was handed to the write channel") written once per slot from iss_n. The old writes were:
+    // hand-over sets it, a write-back start clears it (the two never in the same cycle: a start needs !wb_act), an insert clears it (wins).
+    // So iss_n = (insert ? 0 : hand-over | iss) & !wb_set, with the late wb_set in the last AND. Same values in every cycle.
     reg  [2:0]             st_n [0:N-1];                  // 3 bits per slot
     reg  [N-1:0]           match_n;                       // N = 8 bits
+    reg  [N-1:0]           iss_n;                         // N = 8 bits
     reg  [2:0]             st_base, st_ovr, st_o;         // 3 bits each
-    reg                    ovr, wbe, h_swp, h_snp, h_rel, h_ins;
+    reg                    ovr, wbe, h_swp, h_snp, h_rel, h_ins, m_ln, h_hand;
     wire                   eq_ins = (insert_line_addr == lookup_line_addr_next);
     integer sn;
     always @* begin
@@ -348,15 +359,19 @@ module l1d_victim_cache #(`L1D_PARAMS) (
             // the late write-back start, in the last AND-OR
             wbe      = wb_set[sn] && !ovr;
             st_n[sn] = ({3{wbe}} & VC_WBPEND) | ({3{!wbe}} & st_o);
-            match_n[sn] = (st_n[sn] != VC_FREE) &&
-                          (h_ins ? eq_ins : (la[sn] == lookup_line_addr_next));
+            // VC-F: the look-ahead address match only (the slot's line after this edge equals lookup_line_addr_next)
+            m_ln        = h_ins ? eq_ins : (la[sn] == lookup_line_addr_next);
+            match_n[sn] = m_ln;
+            // VC-E: iss after this edge, the late wb_set in the last AND
+            h_hand    = wb_act && writeback_req_ready && (wb_slot == sn);
+            iss_n[sn] = (h_ins ? 1'b0 : (h_hand || iss[sn])) && !wb_set[sn];
         end
     end
 
     integer s;
     always @(posedge clk) begin
         if (rst) begin
-            lk_match_q <= {N{1'b0}};
+            lk_addr_q <= {N{1'b0}};
             for (s = 0; s < N; s = s + 1) begin
                 st[s]  <= VC_FREE;
                 dty[s] <= 1'b0;
@@ -369,24 +384,26 @@ module l1d_victim_cache #(`L1D_PARAMS) (
             slot_freed_pulses   <= {N{1'b0}};
         end else begin
             slot_freed_pulses <= {N{1'b0}};
-            lk_match_q <= match_n;
+            lk_addr_q <= match_n;                          // VC-F: address part only
             // TIMING OPT (V-7): the slot states from st_n (B response, drain, write-back start, swap, snoop invalidate, release, insert)
-            for (s = 0; s < N; s = s + 1)
-                st[s] <= st_n[s];
+            for (s = 0; s < N; s = s + 1) begin
+                st[s]  <= st_n[s];
+                iss[s] <= iss_n[s];                        // VC-E: hand-over sets it, a start or an insert clears it
+            end
             // write response: the line is in memory, the slot is free (state: st_n)
             if (writeback_done_valid)
                 slot_freed_pulses[writeback_done_slot_id] <= 1'b1;
-            // writeback engine
-            if (wb_act && writeback_req_ready) begin
-                iss[wb_slot] <= 1'b1;
-                wb_act       <= 1'b0;
-            end else if (wb_start) begin
-                wb_act       <= 1'b1;
-                wb_slot      <= wb_pick;
-                wb_oh        <= wb_pick_oh;
-                for (s = 0; s < N; s = s + 1)
-                    if (wb_pick_oh[s])
-                        iss[s] <= 1'b0;                    // (state WBPEND: st_n)
+            // writeback engine (state WBPEND and iss: st_n / iss_n)
+            if (wb_act && writeback_req_ready)
+                wb_act <= 1'b0;
+            else if (wb_start)
+                wb_act <= 1'b1;
+            // TIMING OPT (VC-A): the slot of the next write-back loads in every cycle without an active write-back (it is read only
+            // while wb_act: hand-over, and the write-back pins, which l1d_bank.v uses only with writeback_req_valid). At a start it takes the
+            // same slot as before; the write-back address / slot / data pins differ from the old code only while writeback_req_valid is 0.
+            if (!wb_act) begin
+                wb_slot <= wb_pick;
+                wb_oh   <= wb_pick_oh;
             end
             // snoop read on a VALID slot: shared and clean (an invalidating snoop frees the slot: st_n)
             if (snoop_hit_valid && !snoop_invalidate) begin
@@ -398,8 +415,7 @@ module l1d_victim_cache #(`L1D_PARAMS) (
                 la[insert_slot]   <= insert_line_addr;
                 dty[insert_slot]  <= insert_dirty;
                 shr[insert_slot]  <= insert_shared;
-                iss[insert_slot]  <= 1'b0;
-                dmem[insert_slot] <= insert_line_data;
+                dmem[insert_slot] <= insert_line_data;     // (iss cleared: iss_n)
             end
         end
     end

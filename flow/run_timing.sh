@@ -64,6 +64,11 @@ LINE="RESULT period=$PERIOD synth_slack=$SA synth_crit=$CRIT area=$AREA"
 echo "=== $M at $PERIOD ps: violated paths ==="
 OUT="$OUT" FLOW_HOME="$FLOW_HOME" bash "$ROOT/flow/show_violations.sh" "$M" "${N:-1}" "${G:-8}" > "$OUT/violations.txt" 2>&1
 sed -n '/=== 1. summary/,/=== 3. the/p' "$OUT/violations.txt" | sed '$d'
+# PATH_LOG=1: also the worst violated path in full in the log (start point, every gate with its arrival time, end point)
+if [ "${PATH_LOG:-0}" = 1 ]; then
+    echo "=== $M at $PERIOD ps: worst path ==="
+    sed -n '/=== 3. the/,/=== 4. the/p' "$OUT/violations.txt" | sed '1d;$d' | grep -v '^ *$' | head -90
+fi
 
 if [ "${SIZED:-0}" = 1 ]; then
     echo "=== $M at $PERIOD ps: ORFS floorplan step (gate sizing / pin swap) ==="
