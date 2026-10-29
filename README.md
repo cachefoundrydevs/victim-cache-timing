@@ -85,6 +85,9 @@ and after sizing):
 | 4 | VC-N: four copies of the look-ahead / in-use flops, each with its own pick for 128 data bits | 269.6 | 261.7 | 267.1 | dropped alone |
 | 4 | VC-P: balanced first match of the lookup | 262.5 | 255.0 | 260.0 | dropped alone |
 | 4 | VC-N + VC-P | **253.0** | **248.5** | **250.5** | **winner by the rule (1.1-1.6 ps, noise level; also wins at 200 ps), now `opt`** |
+| 5 | VC-N with 8 copies (64 data bits per pick) | 258.0 | 253.8 | 255.5 | dropped |
+| 5 | VC-N with 16 copies | 275.0 | 253.0 | 272.5 | dropped |
+| 5 | VC-N with 32 copies | 308.4 | 259.8 | 305.9 | dropped (more copies: more flop and area, no fewer buffer levels after synthesis) |
 
 Remaining failing group of `opt` at 250 ps: `lookup_line_data` -3.0 ps (22 endpoints; each pick bit still drives its 128 data bits through three buffer levels). After gate sizing every path meets 250 ps (slack +1.5 ps). At 200 ps: `lookup_line_data` -50.5, `lookup_dirty` -46.6, `wb_slot` -43.3, `use_c` -42.4, `st` -39.9.
 The remaining limit of every version is the one-cycle loop "all slot states -> any pending / dirty / free -> lowest slot -> next state". A
