@@ -207,9 +207,9 @@ module l1d_victim_cache #(`L1D_PARAMS) (
     always @* begin
         lk_seen = 1'b0;
         lk_idx  = {VC_ID_W{1'b0}};
+        // TIMING OPT (VC-P): each first-match bit is one AND with "no lower slot matches" (a balanced OR), not a ripple through the slots
         for (q = 0; q < N; q = q + 1) begin
-            lk_first[q] = lk_match[q] & ~lk_seen;
-            lk_seen     = lk_seen | lk_match[q];
+            lk_first[q] = lk_match[q] & ~|(lk_match & ((1 << q) - 1));
             if (lk_first[q]) lk_idx = lk_idx | q[VC_ID_W-1:0];
         end
     end
@@ -379,8 +379,8 @@ module l1d_victim_cache #(`L1D_PARAMS) (
     // TIMING OPT (VC-N): the 512-bit data select is the widest fan-out of the module (each pick bit drives every data bit through a buffer
     // tree). It is split into LK_DUP parts; each part has its own (* keep *) copies of the look-ahead and in-use flops (loaded with the same
     // values as lk_addr_q / use_q, so equal in every cycle) and its own pick, and drives only LINE_W / LK_DUP data bits.
-    localparam LK_DUP = 4;                                // number of copies
-    localparam LK_PW  = LINE_W / LK_DUP;                  // LK_PW = 128 bits per part
+    localparam LK_DUP = 16;                                // number of copies (TIMING OPT round 5: more copies, less fan-out per pick bit)
+    localparam LK_PW  = LINE_W / LK_DUP;                  // LK_PW = 32 bits per part
     (* keep *) reg [N-1:0] lka_c [0:LK_DUP-1];            // N = 8 bits per copy
     (* keep *) reg [N-1:0] use_c [0:LK_DUP-1];            // N = 8 bits per copy
     genvar gp;
@@ -393,10 +393,8 @@ module l1d_victim_cache #(`L1D_PARAMS) (
             integer qq;
             always @* begin
                 s_c = 1'b0;
-                for (qq = 0; qq < N; qq = qq + 1) begin
-                    f_c[qq] = m_c[qq] & ~s_c;
-                    s_c     = s_c | m_c[qq];
-                end
+                for (qq = 0; qq < N; qq = qq + 1)
+                    f_c[qq] = m_c[qq] & ~|(m_c & ((1 << qq) - 1));   // VC-P
                 f_c[0] = m_c[0] | ~|m_c[N-1:1];           // VC-K: slot 0 also when nothing matches
                 d_c = {LK_PW{1'b0}};
                 for (qq = 0; qq < N; qq = qq + 1)

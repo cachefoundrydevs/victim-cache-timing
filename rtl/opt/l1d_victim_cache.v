@@ -207,9 +207,9 @@ module l1d_victim_cache #(`L1D_PARAMS) (
     always @* begin
         lk_seen = 1'b0;
         lk_idx  = {VC_ID_W{1'b0}};
+        // TIMING OPT (VC-P): each first-match bit is one AND with "no lower slot matches" (a balanced OR), not a ripple through the slots
         for (q = 0; q < N; q = q + 1) begin
-            lk_first[q] = lk_match[q] & ~lk_seen;
-            lk_seen     = lk_seen | lk_match[q];
+            lk_first[q] = lk_match[q] & ~|(lk_match & ((1 << q) - 1));
             if (lk_first[q]) lk_idx = lk_idx | q[VC_ID_W-1:0];
         end
     end
@@ -219,19 +219,16 @@ module l1d_victim_cache #(`L1D_PARAMS) (
     // higher slot is first; otherwise a higher slot is first exactly when one matches), so it no longer waits for the prefix chain.
     wire [N-1:0] lk_pick = {lk_first[N-1:1], lk_match[0] | ~|lk_match[N-1:1]};   // N = 8 bits
     reg  [2:0]        lk_st;                              // 3 bits
-    reg  [LINE_W-1:0] lk_data;                            // LINE_W = 512 bits
     reg               lk_dty, lk_shr;
     always @* begin
-        lk_st = 3'd0;  lk_data = {LINE_W{1'b0}};  lk_dty = 1'b0;  lk_shr = 1'b0;
+        lk_st = 3'd0;  lk_dty = 1'b0;  lk_shr = 1'b0;
         for (q = 0; q < N; q = q + 1) begin
             lk_st   = lk_st   | ({3{lk_pick[q]}}      & st[q]);
-            lk_data = lk_data | ({LINE_W{lk_pick[q]}} & dmem[q]);
             lk_dty  = lk_dty  | (lk_pick[q] & dty[q]);
             lk_shr  = lk_shr  | (lk_pick[q] & shr[q]);
         end
     end
     assign lookup_slot_state = lk_st;
-    assign lookup_line_data  = lk_data;
     assign lookup_dirty      = lk_dty;
     assign lookup_shared     = lk_shr;
 
@@ -376,6 +373,46 @@ module l1d_victim_cache #(`L1D_PARAMS) (
         end
     end
 
+    reg [N-1:0] use_n;                                    // in use after this edge, N = 8 bits
+    integer un;
+    always @* for (un = 0; un < N; un = un + 1) use_n[un] = (st_n[un] != VC_FREE);
+    // TIMING OPT (VC-N): the 512-bit data select is the widest fan-out of the module (each pick bit drives every data bit through a buffer
+    // tree). It is split into LK_DUP parts; each part has its own (* keep *) copies of the look-ahead and in-use flops (loaded with the same
+    // values as lk_addr_q / use_q, so equal in every cycle) and its own pick, and drives only LINE_W / LK_DUP data bits.
+    localparam LK_DUP = 4;                                // number of copies
+    localparam LK_PW  = LINE_W / LK_DUP;                  // LK_PW = 128 bits per part
+    (* keep *) reg [N-1:0] lka_c [0:LK_DUP-1];            // N = 8 bits per copy
+    (* keep *) reg [N-1:0] use_c [0:LK_DUP-1];            // N = 8 bits per copy
+    genvar gp;
+    generate
+        for (gp = 0; gp < LK_DUP; gp = gp + 1) begin : g_lkd
+            wire [N-1:0] m_c = lka_c[gp] & use_c[gp];     // N = 8 bits
+            reg  [N-1:0] f_c;                             // first match, one-hot, N = 8 bits
+            reg          s_c;
+            reg  [LK_PW-1:0] d_c;                         // LK_PW = 128 bits
+            integer qq;
+            always @* begin
+                s_c = 1'b0;
+                for (qq = 0; qq < N; qq = qq + 1)
+                    f_c[qq] = m_c[qq] & ~|(m_c & ((1 << qq) - 1));   // VC-P
+                f_c[0] = m_c[0] | ~|m_c[N-1:1];           // VC-K: slot 0 also when nothing matches
+                d_c = {LK_PW{1'b0}};
+                for (qq = 0; qq < N; qq = qq + 1)
+                    d_c = d_c | ({LK_PW{f_c[qq]}} & dmem[qq][gp*LK_PW +: LK_PW]);
+            end
+            assign lookup_line_data[gp*LK_PW +: LK_PW] = d_c;
+            always @(posedge clk) begin
+                if (rst) begin
+                    lka_c[gp] <= {N{1'b0}};
+                    use_c[gp] <= {N{1'b0}};
+                end else begin
+                    lka_c[gp] <= match_n;
+                    use_c[gp] <= use_n;
+                end
+            end
+        end
+    endgenerate
+
     integer s;
     always @(posedge clk) begin
         if (rst) begin
@@ -397,7 +434,7 @@ module l1d_victim_cache #(`L1D_PARAMS) (
             // TIMING OPT (V-7): the slot states from st_n (B response, drain, write-back start, swap, snoop invalidate, release, insert)
             for (s = 0; s < N; s = s + 1) begin
                 st[s]  <= st_n[s];
-                use_q[s] <= (st_n[s] != VC_FREE);          // VC-G: equal to (st != FREE) after the edge
+                use_q[s] <= use_n[s];                      // VC-G: equal to (st != FREE) after the edge
                 iss[s] <= iss_n[s];                        // VC-E: hand-over sets it, a start or an insert clears it
             end
             // write response: the line is in memory, the slot is free (state: st_n)

@@ -379,8 +379,8 @@ module l1d_victim_cache #(`L1D_PARAMS) (
     // TIMING OPT (VC-N): the 512-bit data select is the widest fan-out of the module (each pick bit drives every data bit through a buffer
     // tree). It is split into LK_DUP parts; each part has its own (* keep *) copies of the look-ahead and in-use flops (loaded with the same
     // values as lk_addr_q / use_q, so equal in every cycle) and its own pick, and drives only LINE_W / LK_DUP data bits.
-    localparam LK_DUP = 4;                                // number of copies
-    localparam LK_PW  = LINE_W / LK_DUP;                  // LK_PW = 128 bits per part
+    localparam LK_DUP = 32;                                // number of copies (TIMING OPT round 5: more copies, less fan-out per pick bit)
+    localparam LK_PW  = LINE_W / LK_DUP;                  // LK_PW = 16 bits per part
     (* keep *) reg [N-1:0] lka_c [0:LK_DUP-1];            // N = 8 bits per copy
     (* keep *) reg [N-1:0] use_c [0:LK_DUP-1];            // N = 8 bits per copy
     genvar gp;

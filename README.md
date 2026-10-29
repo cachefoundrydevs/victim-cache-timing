@@ -65,7 +65,8 @@ without the write-back start (exact only under extra protocol rules, which the r
 | `v7` (+ V-7) | 294.6 | 284.6 | 292.1 | lockstep 3/3, formal 4 cycles |
 | `opt` before round 2 (+ VC-A, VC-D, VC-E) | 282.4 | 263.0 | 279.9 | lockstep 3/3, formal 4 cycles |
 | `opt` after round 2 (+ VC-F, VC-G, VC-I) | 258.7 | 253.0 | 256.2 | lockstep 3/3, formal 4 cycles |
-| **`opt`** (+ VC-K, VC-H) | **254.6** | **249.6 (meets 250)** | **252.1** | lockstep 3/3, formal 4 cycles |
+| `opt` after round 3 (+ VC-K, VC-H) | 254.6 | 249.6 (meets 250) | 252.1 | lockstep 3/3, formal 4 cycles |
+| **`opt`** (+ VC-N, VC-P) | **253.0** | **248.5 (meets 250)** | **250.5** | lockstep 3/3, formal 4 cycles |
 
 Rounds since then (each candidate against the `opt` of its round; a candidate wins only if it is faster at 250 ps both after synthesis
 and after sizing):
@@ -81,8 +82,11 @@ and after sizing):
 | 3 | VC-K: slot-0 pick of the lookup = "slot 0 matches or no other slot matches" | 258.1 | 249.8 | 255.6 | wins by < 5 ps; superseded by the next row |
 | 3 | VC-K + VC-H (balanced write-back pick) | **254.6** | **249.6** | **252.1** | **winner, now `opt`** |
 | 3 | VC-K + VC-M (in use decoded from the 2-bit state, no use_q flops) | 270.3 | 258.7 | 267.8 | dropped |
+| 4 | VC-N: four copies of the look-ahead / in-use flops, each with its own pick for 128 data bits | 269.6 | 261.7 | 267.1 | dropped alone |
+| 4 | VC-P: balanced first match of the lookup | 262.5 | 255.0 | 260.0 | dropped alone |
+| 4 | VC-N + VC-P | **253.0** | **248.5** | **250.5** | **winner by the rule (1.1-1.6 ps, noise level; also wins at 200 ps), now `opt`** |
 
-Remaining failing group of `opt` at 250 ps: `lookup_line_data` -4.6 ps (25 endpoints; the pick bits drive 512 data bits through three buffer levels). After gate sizing every path meets 250 ps (slack +0.4 ps). At 200 ps: `lookup_line_data` -52.1, `st` -47.1, `use_q` -45.0, `victim_slot_index` -40.8.
+Remaining failing group of `opt` at 250 ps: `lookup_line_data` -3.0 ps (22 endpoints; each pick bit still drives its 128 data bits through three buffer levels). After gate sizing every path meets 250 ps (slack +1.5 ps). At 200 ps: `lookup_line_data` -50.5, `lookup_dirty` -46.6, `wb_slot` -43.3, `use_c` -42.4, `st` -39.9.
 The remaining limit of every version is the one-cycle loop "all slot states -> any pending / dirty / free -> lowest slot -> next state". A
 cure without extra cycles is what the variants explore; registering the write-back decision would add a cycle to the start of a write-back.
 
