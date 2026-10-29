@@ -67,7 +67,8 @@ without the write-back start (exact only under extra protocol rules, which the r
 | `opt` after round 2 (+ VC-F, VC-G, VC-I) | 258.7 | 253.0 | 256.2 | lockstep 3/3, formal 4 cycles |
 | `opt` after round 3 (+ VC-K, VC-H) | 254.6 | 249.6 (meets 250) | 252.1 | lockstep 3/3, formal 4 cycles |
 | `opt` after round 4 (+ VC-N, VC-P) | 253.0 | 248.5 (meets 250) | 250.5 | lockstep 3/3, formal 4 cycles |
-| **`opt`** (+ VC-S, VC-T) | **251.3** | **246.8 (meets 250)** | **248.8** | lockstep 3/3, formal 4 cycles |
+| `opt` after round 7 (+ VC-S, VC-T) | 251.3 | 246.8 (meets 250) | 248.8 | lockstep 3/3, formal 4 cycles |
+| **`opt`** (+ VC-V) | **245.4 (meets 250)** | **245.4** | **242.9** | lockstep 3/3, formal 4 cycles |
 
 Rounds since then (each candidate against the `opt` of its round; a candidate wins only if it is faster at 250 ps both after synthesis
 and after sizing):
@@ -97,8 +98,11 @@ and after sizing):
 | 8 | VC-W: one in-use flop set for all lookup copies | 258.7 | 249.9 | 256.2 | dropped |
 | 8 | VC-W + VC-U (in use next with the pick in the last gate) | 254.5 | 249.4 | 252.0 | dropped |
 | 8 | VC-W + VC-U + VC-V (free test from the in-use flops) | 252.2 | 247.9 | 249.7 | dropped |
+| 9 | VC-V: free test from the in-use flops (use_q == st != FREE) | **245.4** | **245.4** | **242.9** | **winner (5.9 ps), now `opt`: meets 250 ps already after synthesis** |
+| 9 | VC-U: in use next with the pick in the last gate | 249.8 | 249.8 | 247.3 | wins less than VC-V; tried with it in round 10 |
+| 9 | VC-Y: second kept copy of the write-back pick | 266.7 | 259.7 | 264.2 | dropped |
 
-Remaining failing groups of `opt` at 250 ps: `st` -1.3, `use_c` -0.1 ps (the write-back pick loop). After gate sizing every path meets 250 ps (slack +3.2 ps). At 200 ps: `st` -48.8, `use_c` -47.6, `iss` -32.0, `lookup_line_data` -30.2.
+`opt` meets 250 ps after synthesis alone (slack +4.6 ps, no failing path). At 200 ps: `st` -42.9, `use_c` -39.4, `wb_slot` -38.9, `lka_c` -37.4, `lookup_line_data` -37.2.
 The remaining limit of every version is the one-cycle loop "all slot states -> any pending / dirty / free -> lowest slot -> next state". A
 cure without extra cycles is what the variants explore; registering the write-back decision would add a cycle to the start of a write-back.
 

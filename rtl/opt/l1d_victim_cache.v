@@ -166,6 +166,7 @@ module l1d_victim_cache #(`L1D_PARAMS) (
     // per-slot summaries: in_use = not FREE; is_free / is_clean / is_dirty / is_pend = candidates for a victim, a drop or a
     // writeback; excl = the slot is being swapped or snooped in this very cycle, so it is not a candidate
     wire [N-1:0]             in_use, is_free, is_clean, is_dirty, is_pend;
+    reg  [N-1:0]             use_q;       // in-use flops (VC-G), N = 8 bits
     wire [N-1:0]             excl;        // slot starting a swap or snooped this cycle: not a candidate
 
     // one set of summary gates per slot (g_slot[0] .. g_slot[N-1])
@@ -174,7 +175,7 @@ module l1d_victim_cache #(`L1D_PARAMS) (
         for (g = 0; g < N; g = g + 1) begin : g_slot
             assign excl[g]     = (swap_start_valid && (swap_start_slot == g)) || (snoop_hit_valid && (snoop_hit_slot == g));
             assign in_use[g]   = (st[g] != VC_FREE);
-            assign is_free[g]  = (st[g] == VC_FREE) && !excl[g];
+            assign is_free[g]  = !use_q[g] && !excl[g];   // TIMING OPT (VC-V): use_q == (st != FREE) in every cycle (VC-G)
             assign is_clean[g] = (st[g] == VC_VALID) && !dty[g] && !excl[g];
             assign is_dirty[g] = (st[g] == VC_VALID) &&  dty[g] && !excl[g];
             assign is_pend[g]  = (st[g] == VC_WBPEND) && !iss[g];
@@ -194,7 +195,6 @@ module l1d_victim_cache #(`L1D_PARAMS) (
     // TIMING OPT (VC-G): the in-use bits come from their own flops use_q (loaded with st_n != FREE, so use_q == (st != FREE) in every cycle),
     // so the lookup path starts with one AND of two flops instead of the 3-bit state decode.
     reg  [N-1:0] lk_addr_q;                               // N = 8 bits
-    reg  [N-1:0] use_q;                                   // N = 8 bits
     wire [N-1:0] lk_match_q = lk_addr_q & use_q;          // N = 8 bits (the name is kept: the test counts multi-slot matches with it)
     wire [N-1:0] lk_match = lk_match_q;                   // N = 8 bits
     // TIMING OPT (V-1): the lowest matching slot as ONE-HOT bits (prefix chain) and the slot's state, data, dirty and shared bits

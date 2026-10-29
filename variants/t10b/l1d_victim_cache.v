@@ -166,6 +166,7 @@ module l1d_victim_cache #(`L1D_PARAMS) (
     // per-slot summaries: in_use = not FREE; is_free / is_clean / is_dirty / is_pend = candidates for a victim, a drop or a
     // writeback; excl = the slot is being swapped or snooped in this very cycle, so it is not a candidate
     wire [N-1:0]             in_use, is_free, is_clean, is_dirty, is_pend;
+    reg  [N-1:0]             use_q;       // in-use flops (VC-G), N = 8 bits
     wire [N-1:0]             excl;        // slot starting a swap or snooped this cycle: not a candidate
 
     // one set of summary gates per slot (g_slot[0] .. g_slot[N-1])
@@ -173,8 +174,8 @@ module l1d_victim_cache #(`L1D_PARAMS) (
     generate
         for (g = 0; g < N; g = g + 1) begin : g_slot
             assign excl[g]     = (swap_start_valid && (swap_start_slot == g)) || (snoop_hit_valid && (snoop_hit_slot == g));
-            assign in_use[g]   = (st[g] != VC_FREE);
-            assign is_free[g]  = (st[g] == VC_FREE) && !excl[g];
+            assign in_use[g]   = use_q[g];                 // TIMING OPT (VC-V2): use_q == (st != FREE) in every cycle (VC-G)
+            assign is_free[g]  = !use_q[g] && !excl[g];   // TIMING OPT (VC-V): use_q == (st != FREE) in every cycle (VC-G)
             assign is_clean[g] = (st[g] == VC_VALID) && !dty[g] && !excl[g];
             assign is_dirty[g] = (st[g] == VC_VALID) &&  dty[g] && !excl[g];
             assign is_pend[g]  = (st[g] == VC_WBPEND) && !iss[g];
@@ -194,7 +195,6 @@ module l1d_victim_cache #(`L1D_PARAMS) (
     // TIMING OPT (VC-G): the in-use bits come from their own flops use_q (loaded with st_n != FREE, so use_q == (st != FREE) in every cycle),
     // so the lookup path starts with one AND of two flops instead of the 3-bit state decode.
     reg  [N-1:0] lk_addr_q;                               // N = 8 bits
-    reg  [N-1:0] use_q;                                   // N = 8 bits
     wire [N-1:0] lk_match_q = lk_addr_q & use_q;          // N = 8 bits (the name is kept: the test counts multi-slot matches with it)
     wire [N-1:0] lk_match = lk_match_q;                   // N = 8 bits
     // TIMING OPT (V-1): the lowest matching slot as ONE-HOT bits (prefix chain) and the slot's state, data, dirty and shared bits
@@ -347,7 +347,6 @@ module l1d_victim_cache #(`L1D_PARAMS) (
     reg  [2:0]             st_n [0:N-1];                  // 3 bits per slot
     reg  [N-1:0]           match_n;                       // N = 8 bits
     reg  [N-1:0]           iss_n;                         // N = 8 bits
-    reg  [N-1:0]           use_o, ovr_v, b_hit;           // VC-U: per slot, N = 8 bits each
     reg  [2:0]             st_base, st_ovr, st_o;         // 3 bits each
     reg                    ovr, wbe, h_swp, h_snp, h_rel, h_ins, m_ln, h_hand;
     wire                   eq_ins = (insert_line_addr == lookup_line_addr_next);
@@ -366,9 +365,6 @@ module l1d_victim_cache #(`L1D_PARAMS) (
             ovr    = h_swp || h_snp || h_rel || h_ins;
             st_ovr = h_ins ? (insert_as_writeback_pending ? VC_WBPEND : VC_VALID) : ((h_rel || h_snp) ? VC_FREE : VC_MOVING);
             st_o   = ovr ? st_ovr : st_base;
-            use_o[sn] = (st_o != VC_FREE);                 // VC-U
-            ovr_v[sn] = ovr;
-            b_hit[sn] = writeback_done_valid && (writeback_done_slot_id == sn);
             // the late write-back start, in the last AND-OR
             wbe      = wb_set[sn] && !ovr;
             st_n[sn] = ({3{wbe}} & VC_WBPEND) | ({3{!wbe}} & st_o);
@@ -383,10 +379,7 @@ module l1d_victim_cache #(`L1D_PARAMS) (
 
     reg [N-1:0] use_n;                                    // in use after this edge, N = 8 bits
     integer un;
-    // TIMING OPT (VC-U): use_n = (st_n != FREE) written as (st_o != FREE) | (wb_set & !ovr & B response on this slot). Equal in every cycle: the
-    // write-back start makes a slot WBPEND (never FREE), and it meets st_o == FREE only when a B response frees that same slot in this cycle
-    // (a start needs a WBPEND or dirty VALID slot; the drain frees only clean VALID slots). The late pick meets only the last AND-OR.
-    always @* for (un = 0; un < N; un = un + 1) use_n[un] = use_o[un] | (wb_set[un] & ~ovr_v[un] & b_hit[un]);
+    always @* for (un = 0; un < N; un = un + 1) use_n[un] = (st_n[un] != VC_FREE);
     // TIMING OPT (VC-S): the lookup select is a binary PRIORITY-MUX TREE instead of "first match -> AND-OR": each node takes its lower half when
     // that half has a match or neither half has one, else its upper half. By induction a node gives the lowest matching slot of its subtree,
     // or its lowest slot when nothing in it matches; so the root gives the lowest matching slot, or slot 0 when nothing matches, which is
