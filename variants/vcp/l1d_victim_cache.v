@@ -194,8 +194,8 @@ module l1d_victim_cache #(`L1D_PARAMS) (
     // TIMING OPT (VC-G): the in-use bits come from their own flops use_q (loaded with st_n != FREE, so use_q == (st != FREE) in every cycle),
     // so the lookup path starts with one AND of two flops instead of the 3-bit state decode.
     reg  [N-1:0] lk_addr_q;                               // N = 8 bits
-    // TIMING OPT (VC-M): with the 2-bit state (VC-I) "in use" is one OR2 of the state flops, so the use_q copies are dropped again.
-    wire [N-1:0] lk_match_q = lk_addr_q & in_use;         // N = 8 bits (the name is kept: the test counts multi-slot matches with it)
+    reg  [N-1:0] use_q;                                   // N = 8 bits
+    wire [N-1:0] lk_match_q = lk_addr_q & use_q;          // N = 8 bits (the name is kept: the test counts multi-slot matches with it)
     wire [N-1:0] lk_match = lk_match_q;                   // N = 8 bits
     // TIMING OPT (V-1): the lowest matching slot as ONE-HOT bits (prefix chain) and the slot's state, data, dirty and shared bits
     // by AND-OR with it, not the encoded number as a mux select (512-bit data). lk_pick = lk_first, or slot 0 when no other slot is picked,
@@ -207,9 +207,9 @@ module l1d_victim_cache #(`L1D_PARAMS) (
     always @* begin
         lk_seen = 1'b0;
         lk_idx  = {VC_ID_W{1'b0}};
+        // TIMING OPT (VC-P): each first-match bit is one AND with "no lower slot matches" (a balanced OR), not a ripple through the slots
         for (q = 0; q < N; q = q + 1) begin
-            lk_first[q] = lk_match[q] & ~lk_seen;
-            lk_seen     = lk_seen | lk_match[q];
+            lk_first[q] = lk_match[q] & ~|(lk_match & ((1 << q) - 1));
             if (lk_first[q]) lk_idx = lk_idx | q[VC_ID_W-1:0];
         end
     end
@@ -302,16 +302,16 @@ module l1d_victim_cache #(`L1D_PARAMS) (
     // sum of products, without the one-hot mux and the AND with wb_start: the lowest pending slot, or (no pending slot, under pressure)
     // the lowest dirty VALID slot. Equal to the old term in every cycle (any_pend = 1: wb_start = !wb_act and the pick is the pending one;
     // any_pend = 0: wb_start = !wb_act && pressure && any_dirty, and a dirty pick implies any_dirty).
+    // TIMING OPT (VC-H): the same wb_set, written as balanced logic: "a lower slot is pending / dirty" is one OR over the masked bits of
+    // each slot (a tree, not a ripple chain through the slots), and the global part of the dirty branch (idle, no pending slot, under
+    // pressure) is one signal wb_dg. Same value in every cycle.
     reg  [N-1:0]       wb_set;                            // N = 8 bits
-    reg                pend_below, dirty_below;           // a lower slot is pending / dirty
+    wire               wb_dg = !wb_act && !any_pend && pressure;
     integer            v;
     always @* begin
-        pend_below = 1'b0;  dirty_below = 1'b0;
-        for (v = 0; v < N; v = v + 1) begin
-            wb_set[v]   = !wb_act && ((is_pend[v] && !pend_below) || (!any_pend && pressure && is_dirty[v] && !dirty_below));
-            pend_below  = pend_below  | is_pend[v];
-            dirty_below = dirty_below | is_dirty[v];
-        end
+        for (v = 0; v < N; v = v + 1)
+            wb_set[v] = (!wb_act && is_pend[v] && ~|(is_pend & ((1 << v) - 1))) ||
+                        (wb_dg && is_dirty[v] && ~|(is_dirty & ((1 << v) - 1)));
     end
     // TIMING OPT (V-2): the write-back line and data by AND-OR with wb_oh (a register next to wb_slot that always holds the same slot)
     reg  [LINE_ADDR_W-1:0] wb_la;                         // LINE_ADDR_W = 58 bits
@@ -380,6 +380,7 @@ module l1d_victim_cache #(`L1D_PARAMS) (
     always @(posedge clk) begin
         if (rst) begin
             lk_addr_q <= {N{1'b0}};
+            use_q     <= {N{1'b0}};
             for (s = 0; s < N; s = s + 1) begin
                 st[s]  <= VC_FREE;
                 dty[s] <= 1'b0;
@@ -396,6 +397,7 @@ module l1d_victim_cache #(`L1D_PARAMS) (
             // TIMING OPT (V-7): the slot states from st_n (B response, drain, write-back start, swap, snoop invalidate, release, insert)
             for (s = 0; s < N; s = s + 1) begin
                 st[s]  <= st_n[s];
+                use_q[s] <= (st_n[s] != VC_FREE);          // VC-G: equal to (st != FREE) after the edge
                 iss[s] <= iss_n[s];                        // VC-E: hand-over sets it, a start or an insert clears it
             end
             // write response: the line is in memory, the slot is free (state: st_n)

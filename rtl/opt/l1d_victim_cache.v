@@ -215,7 +215,9 @@ module l1d_victim_cache #(`L1D_PARAMS) (
     end
     assign lookup_hit  = |lk_match;
     assign lookup_slot = lk_idx;
-    wire [N-1:0] lk_pick = {lk_first[N-1:1], ~|lk_first[N-1:1]};   // N = 8 bits
+    // TIMING OPT (VC-K): bit 0 of the pick is "slot 0 matches, or no other slot matches" (= ~|lk_first[N-1:1]: when slot 0 matches no
+    // higher slot is first; otherwise a higher slot is first exactly when one matches), so it no longer waits for the prefix chain.
+    wire [N-1:0] lk_pick = {lk_first[N-1:1], lk_match[0] | ~|lk_match[N-1:1]};   // N = 8 bits
     reg  [2:0]        lk_st;                              // 3 bits
     reg  [LINE_W-1:0] lk_data;                            // LINE_W = 512 bits
     reg               lk_dty, lk_shr;
@@ -300,16 +302,16 @@ module l1d_victim_cache #(`L1D_PARAMS) (
     // sum of products, without the one-hot mux and the AND with wb_start: the lowest pending slot, or (no pending slot, under pressure)
     // the lowest dirty VALID slot. Equal to the old term in every cycle (any_pend = 1: wb_start = !wb_act and the pick is the pending one;
     // any_pend = 0: wb_start = !wb_act && pressure && any_dirty, and a dirty pick implies any_dirty).
+    // TIMING OPT (VC-H): the same wb_set, written as balanced logic: "a lower slot is pending / dirty" is one OR over the masked bits of
+    // each slot (a tree, not a ripple chain through the slots), and the global part of the dirty branch (idle, no pending slot, under
+    // pressure) is one signal wb_dg. Same value in every cycle.
     reg  [N-1:0]       wb_set;                            // N = 8 bits
-    reg                pend_below, dirty_below;           // a lower slot is pending / dirty
+    wire               wb_dg = !wb_act && !any_pend && pressure;
     integer            v;
     always @* begin
-        pend_below = 1'b0;  dirty_below = 1'b0;
-        for (v = 0; v < N; v = v + 1) begin
-            wb_set[v]   = !wb_act && ((is_pend[v] && !pend_below) || (!any_pend && pressure && is_dirty[v] && !dirty_below));
-            pend_below  = pend_below  | is_pend[v];
-            dirty_below = dirty_below | is_dirty[v];
-        end
+        for (v = 0; v < N; v = v + 1)
+            wb_set[v] = (!wb_act && is_pend[v] && ~|(is_pend & ((1 << v) - 1))) ||
+                        (wb_dg && is_dirty[v] && ~|(is_dirty & ((1 << v) - 1)));
     end
     // TIMING OPT (V-2): the write-back line and data by AND-OR with wb_oh (a register next to wb_slot that always holds the same slot)
     reg  [LINE_ADDR_W-1:0] wb_la;                         // LINE_ADDR_W = 58 bits
