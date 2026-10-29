@@ -94,6 +94,9 @@ and after sizing):
 | 6 | VC-S per copy + a tree for the flags | 271.0 | 254.5 | 268.5 | dropped |
 | 7 | VC-T: victim_slot_available from the clean slots directly (exact: the age order is total on all inserted slots) | 273.3 | 252.9 | 270.8 | dropped alone |
 | 7 | VC-S per copy + VC-T | **251.3** | **246.8** | **248.8** | **winner by the rule (1.7 ps, noise level; also wins at 200 ps), now `opt`** |
+| 8 | VC-W: one in-use flop set for all lookup copies | 258.7 | 249.9 | 256.2 | dropped |
+| 8 | VC-W + VC-U (in use next with the pick in the last gate) | 254.5 | 249.4 | 252.0 | dropped |
+| 8 | VC-W + VC-U + VC-V (free test from the in-use flops) | 252.2 | 247.9 | 249.7 | dropped |
 
 Remaining failing groups of `opt` at 250 ps: `st` -1.3, `use_c` -0.1 ps (the write-back pick loop). After gate sizing every path meets 250 ps (slack +3.2 ps). At 200 ps: `st` -48.8, `use_c` -47.6, `iss` -32.0, `lookup_line_data` -30.2.
 The remaining limit of every version is the one-cycle loop "all slot states -> any pending / dirty / free -> lowest slot -> next state". A
