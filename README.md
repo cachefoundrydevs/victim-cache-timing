@@ -60,11 +60,12 @@ without the write-back start (exact only under extra protocol rules, which the r
 
 | Version | at 250 ps | after gate sizing | at 200 ps | Function |
 |---|---|---|---|---|
-| `original` (rtl/ref) | 346.2 | - | - | reference |
-| `v1245` (V-1, V-2, V-4, V-5) | 301.8 | - | 299.3 | lockstep 3/3, formal 4 cycles |
-| `v7` (+ V-7) | 294.6 | 284.8 | 292.1 | lockstep 3/3, formal 4 cycles |
-| `opt` (+ VC-A, VC-D, VC-E) | measured by this repository's workflow | | | |
+| `original` (rtl/ref) | 346.2 | 335.3 | 343.7 | reference |
+| `v1245` (V-1, V-2, V-4, V-5) | 301.8 | 293.3 | 299.3 | lockstep 3/3, formal 4 cycles |
+| `v7` (+ V-7) | 294.6 | 284.6 | 292.1 | lockstep 3/3, formal 4 cycles |
+| **`opt`** (+ VC-A, VC-D, VC-E) | **282.4** | **263.0** | **279.9** | lockstep 3/3, formal 4 cycles |
 
+Remaining failing groups of `opt` at 250 ps: `lk_match_q` -32.4, `st` -26.3, `wb_slot` -13.8, `iss` -7.4 ps (after gate sizing -13.0 ps).
 The remaining limit of every version is the one-cycle loop "all slot states -> any pending / dirty / free -> lowest slot -> next state". A
 cure without extra cycles is what the variants explore; registering the write-back decision would add a cycle to the start of a write-back.
 
