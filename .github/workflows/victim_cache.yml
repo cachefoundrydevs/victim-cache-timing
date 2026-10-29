@@ -1,0 +1,94 @@
+# Every push: each version of the victim cache (rtl/opt and every folder in variants/) is checked in its own parallel job:
+# lockstep simulation and formal equivalence against the original (rtl/ref), then ASAP7 timing at 250 ps (with gate sizing) and 200 ps.
+# The last job puts all results into one table (the run's summary page; also the artifact "comparison").
+name: victim cache timing
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  list:
+    runs-on: ubuntu-24.04
+    outputs:
+      variants: ${{ steps.l.outputs.variants }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: l
+        run: |
+          v='["opt"'
+          for d in variants/*/; do [ -f "$d/l1d_victim_cache.v" ] && v="$v,\"$(basename "$d")\""; done
+          echo "variants=$v]" >> "$GITHUB_OUTPUT"
+          echo "versions: $v]"
+
+  check:
+    needs: list
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    container:
+      image: openroad/orfs:latest
+      options: --user root
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: ${{ fromJSON(needs.list.outputs.variants) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: tools
+        run: |
+          command -v iverilog || (apt-get update -qq && apt-get install -y -qq iverilog > /dev/null)
+          iverilog -V 2>&1 | head -1
+      - name: checks and timing
+        run: |
+          V="${{ matrix.variant }}"
+          if [ "$V" = opt ]; then D=rtl/opt; else D=build/v_$V; mkdir -p "$D"; cp rtl/opt/*.v "$D/"; cp variants/$V/*.v "$D/"; fi
+          FUNC=1; [ "$V" = original ] && FUNC=0          # the original has no look-ahead port: timing only (it is the reference)
+          FUNC=$FUNC bash scripts/run_all.sh "$V" "$D" "out/$V"
+      - name: summary
+        if: always()
+        run: cat "out/${{ matrix.variant }}/summary.md" >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: result-${{ matrix.variant }}
+          retention-days: 30
+          path: |
+            out/${{ matrix.variant }}/summary.md
+            out/${{ matrix.variant }}/lockstep/*.log
+            out/${{ matrix.variant }}/formal/*.log
+            out/${{ matrix.variant }}/t250/result.txt
+            out/${{ matrix.variant }}/t250/violations.txt
+            out/${{ matrix.variant }}/t250/results/*.rpt
+            out/${{ matrix.variant }}/t200/result.txt
+            out/${{ matrix.variant }}/t200/violations.txt
+
+  compare:
+    needs: check
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: result-*
+          path: res
+      - name: table
+        run: |
+          {
+            echo "## Comparison (critical delay in ps, ASAP7, ideal clock, no wires)"
+            echo
+            echo "| version | lockstep | formal | 250 ps synth | 250 ps sized | 200 ps synth | area um2 |"
+            echo "|---|---|---|---|---|---|---|"
+            for d in res/result-*; do
+              V=${d#res/result-}
+              g() { sed -n "s/.* $2=\([^ ]*\).*/\1/p" "$d/$1" 2>/dev/null | head -1; }
+              LS=$(sed -n 's/^| lockstep against the original (3 runs) |\(.*\) |$/\1/p' "$d/summary.md")
+              FM=$(sed -n 's/^| formal equivalence | \(.*\) |$/\1/p' "$d/summary.md" | cut -c1-40)
+              echo "| $V |$LS | $FM | $(g t250/result.txt synth_crit) | $(g t250/result.txt sized_crit) | $(g t200/result.txt synth_crit) | $(g t250/result.txt area) |"
+            done
+          } > comparison.md
+          cat comparison.md >> "$GITHUB_STEP_SUMMARY"
+          cat comparison.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: comparison
+          path: comparison.md
