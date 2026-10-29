@@ -174,7 +174,7 @@ module l1d_victim_cache #(`L1D_PARAMS) (
     generate
         for (g = 0; g < N; g = g + 1) begin : g_slot
             assign excl[g]     = (swap_start_valid && (swap_start_slot == g)) || (snoop_hit_valid && (snoop_hit_slot == g));
-            assign in_use[g]   = (st[g] != VC_FREE);
+            assign in_use[g]   = use_q[g];                 // TIMING OPT (VC-V2): use_q == (st != FREE) in every cycle (VC-G)
             assign is_free[g]  = !use_q[g] && !excl[g];   // TIMING OPT (VC-V): use_q == (st != FREE) in every cycle (VC-G)
             assign is_clean[g] = (st[g] == VC_VALID) && !dty[g] && !excl[g];
             assign is_dirty[g] = (st[g] == VC_VALID) &&  dty[g] && !excl[g];
